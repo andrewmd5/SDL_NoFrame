@@ -66,7 +66,7 @@ If you want to compile the proxy yourself:
 
 1. Install Visual Studio with C++ development tools
 2. Run `generate_lib.bat` to create the import library
-3. Compile with: `cl /LD /MT SDL_Proxy.cpp /Fe:SDL.dll /link /MACHINE:X86 /DEF:hooks.def`
+3. Compile with: `cl /LD /MT SDL_Proxy.cpp /Fe:SDL.dll /link /MACHINE:X86`
 
 ## License
 
