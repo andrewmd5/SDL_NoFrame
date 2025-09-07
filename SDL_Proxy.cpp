@@ -1,6 +1,5 @@
 #include <windows.h>
 
-#pragma comment(lib, "SDL_original.lib")
 #pragma comment(lib, "user32.lib")
 
 #define SDL_NOFRAME 0x00000020
@@ -13,6 +12,22 @@ struct SDL_Surface {
     void* pixels;
 };
 
+
+typedef SDL_Surface* (__cdecl *SDL_SetVideoMode_t)(int width, int height, int bpp, unsigned int flags);
+typedef int (__cdecl *SDL_WM_ToggleFullScreen_t)(SDL_Surface* surface);
+typedef void (__cdecl *SDL_WM_SetCaption_t)(const char* title, const char* icon);
+
+
+SDL_SetVideoMode_t Real_SDL_SetVideoMode = NULL;
+SDL_WM_ToggleFullScreen_t Real_SDL_WM_ToggleFullScreen = NULL;
+SDL_WM_SetCaption_t Real_SDL_WM_SetCaption = NULL;
+
+HMODULE hOriginalSDL = NULL;
+
+HWND g_hGameWindow = NULL;
+BOOL g_forceFrameless = TRUE;
+
+// Export all other SDL functions directly to the original DLL
 #pragma comment(linker, "/export:SDL_AddTimer=SDL_original.SDL_AddTimer")
 #pragma comment(linker, "/export:SDL_AllocRW=SDL_original.SDL_AllocRW")
 #pragma comment(linker, "/export:SDL_AudioDriverName=SDL_original.SDL_AudioDriverName")
@@ -218,43 +233,57 @@ struct SDL_Surface {
 #pragma comment(linker, "/export:SDL_ulltoa=SDL_original.SDL_ulltoa")
 #pragma comment(linker, "/export:SDL_vsnprintf=SDL_original.SDL_vsnprintf")
 
-extern "C" {
-    SDL_Surface* SDL_SetVideoMode(int width, int height, int bpp, unsigned int flags);
-    int SDL_WM_ToggleFullScreen(SDL_Surface* surface);
-    void SDL_WM_SetCaption(const char* title, const char* icon);
+// Also link to the original SDL library
+#pragma comment(lib, "SDL_original.lib")
+
+BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
+    char className[256];
+    GetClassNameA(hwnd, className, sizeof(className));
+    if (strstr(className, "SDL") != NULL) {
+        *(HWND*)lParam = hwnd;
+        return FALSE;
+    }
+    return TRUE;
 }
-
-
-HWND g_hGameWindow = NULL;
-bool g_forceFrameless = true;
 
 HWND FindSDLWindow() {
     HWND hwnd = FindWindowA("SDL_app", NULL);
     if (!hwnd) {
-        EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
-            char className[256];
-            GetClassNameA(hwnd, className, sizeof(className));
-            if (strstr(className, "SDL") != NULL) {
-                *(HWND*)lParam = hwnd;
-                return FALSE;
-            }
-            return TRUE;
-        }, (LPARAM)&hwnd);
+        EnumWindows(EnumWindowsProc, (LPARAM)&hwnd);
     }
     return hwnd;
 }
 
-extern "C" __declspec(dllexport) SDL_Surface* __cdecl Hook_SDL_SetVideoMode(int width, int height, int bpp, unsigned int flags) {
+void InitializeHooks() {
+    hOriginalSDL = LoadLibraryA("SDL_original.dll");
+    if (hOriginalSDL) {
+        Real_SDL_SetVideoMode = (SDL_SetVideoMode_t)GetProcAddress(hOriginalSDL, "SDL_SetVideoMode");
+        Real_SDL_WM_ToggleFullScreen = (SDL_WM_ToggleFullScreen_t)GetProcAddress(hOriginalSDL, "SDL_WM_ToggleFullScreen");
+        Real_SDL_WM_SetCaption = (SDL_WM_SetCaption_t)GetProcAddress(hOriginalSDL, "SDL_WM_SetCaption");
+    }
+}
+
+// Our hook functions - exported with the SDL names
+extern "C" __declspec(dllexport) SDL_Surface* __cdecl SDL_SetVideoMode(int width, int height, int bpp, unsigned int flags) {
+    // Initialize on first call
+    if (!Real_SDL_SetVideoMode) {
+        InitializeHooks();
+    }
+    
+    if (!Real_SDL_SetVideoMode) {
+        return NULL; // Failed to load original function
+    }
+    
     if (g_forceFrameless && !(flags & 0x80000000)) {
         flags |= SDL_NOFRAME;
     }
-    // Call the original function with modified flags
-    SDL_Surface* result = SDL_SetVideoMode(width, height, bpp, flags);
+    
+    // Call the original function
+    SDL_Surface* result = Real_SDL_SetVideoMode(width, height, bpp, flags);
     
     if (result) {
         // If not fullscreen, center the window
         if (!(flags & 0x80000000)) {
-            Sleep(10);
             g_hGameWindow = FindSDLWindow();
             if (g_hGameWindow) {
                 RECT desktop;
@@ -269,14 +298,40 @@ extern "C" __declspec(dllexport) SDL_Surface* __cdecl Hook_SDL_SetVideoMode(int 
     return result;
 }
 
-extern "C" __declspec(dllexport) int __cdecl Hook_SDL_WM_ToggleFullScreen(SDL_Surface* surface) {
-    return SDL_WM_ToggleFullScreen(surface);
+extern "C" __declspec(dllexport) int __cdecl SDL_WM_ToggleFullScreen(SDL_Surface* surface) {
+    if (!Real_SDL_WM_ToggleFullScreen) {
+        InitializeHooks();
+    }
+    
+    if (!Real_SDL_WM_ToggleFullScreen) {
+        return 0;
+    }
+    
+    return Real_SDL_WM_ToggleFullScreen(surface);
 }
 
-extern "C" __declspec(dllexport) void __cdecl Hook_SDL_WM_SetCaption(const char* title, const char* icon) {
-    SDL_WM_SetCaption(title, icon);
+extern "C" __declspec(dllexport) void __cdecl SDL_WM_SetCaption(const char* title, const char* icon) {
+    if (!Real_SDL_WM_SetCaption) {
+        InitializeHooks();
+    }
+    
+    if (!Real_SDL_WM_SetCaption) {
+        return;
+    }
+    
+    Real_SDL_WM_SetCaption(title, icon);
 }
 
-#pragma comment(linker, "/export:SDL_SetVideoMode=Hook_SDL_SetVideoMode")
-#pragma comment(linker, "/export:SDL_WM_ToggleFullScreen=Hook_SDL_WM_ToggleFullScreen")
-#pragma comment(linker, "/export:SDL_WM_SetCaption=Hook_SDL_WM_SetCaption")
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+    switch (ul_reason_for_call) {
+    case DLL_PROCESS_ATTACH:
+        InitializeHooks();
+        break;
+    case DLL_PROCESS_DETACH:
+        if (hOriginalSDL) {
+            FreeLibrary(hOriginalSDL);
+        }
+        break;
+    }
+    return TRUE;
+}
