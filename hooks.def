@@ -1,0 +1,4 @@
+EXPORTS
+    SDL_SetVideoMode=Hook_SDL_SetVideoMode
+    SDL_WM_ToggleFullScreen=Hook_SDL_WM_ToggleFullScreen
+    SDL_WM_SetCaption=Hook_SDL_WM_SetCaption
